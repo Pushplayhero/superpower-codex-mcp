@@ -1,0 +1,864 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveCliInvocation, type CommandRunner } from "../src/lib/command.js";
+import { debugWithCodexHandler } from "../src/tools/debugWithCodex.js";
+import { planWithCodexHandler } from "../src/tools/planWithCodex.js";
+import { reviewCodeQualityHandler } from "../src/tools/reviewCodeQuality.js";
+import { reviewWithCodexHandler } from "../src/tools/reviewWithCodex.js";
+import { runDevelopmentWorkflowHandler } from "../src/tools/runDevelopmentWorkflow.js";
+import { runGeminiCodingTaskHandler } from "../src/tools/runGeminiCodingTask.js";
+import { runCodingTaskHandler } from "../src/tools/runCodingTask.js";
+import { summarizeRepoContextHandler } from "../src/tools/summarizeRepoContext.js";
+import { validateWorkspaceHandler } from "../src/tools/validateWorkspace.js";
+import { verifyWithCodexHandler } from "../src/tools/verifyWithCodex.js";
+
+const created: string[] = [];
+
+async function tempWorkspace(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), "sp-codex-tool-"));
+  created.push(dir);
+  process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = dir;
+  await writeFile(path.join(dir, "AGENTS.md"), "- Run npm test");
+  await writeFile(path.join(dir, "GEMINI.md"), "- Call plan_with_codex before broad changes");
+  return dir;
+}
+
+afterEach(async () => {
+  while (created.length > 0) {
+    const dir = created.pop();
+    if (dir) await rm(dir, { recursive: true, force: true });
+  }
+  delete process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS;
+});
+
+function fakeRunner(stdout: string): CommandRunner {
+  return vi.fn(async (command, args) => ({
+    command,
+    args,
+    stdout,
+    stderr: "",
+    exitCode: 0,
+    timedOut: false
+  }));
+}
+
+function sequencedRunner(
+  outputs: Array<{
+    stdout: string;
+    stderr?: string;
+    exitCode?: number;
+    timedOut?: boolean;
+  }>
+): CommandRunner {
+  return vi.fn(async (command, args) => {
+    const next = outputs.shift();
+    if (!next) throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+    return {
+      command,
+      args,
+      stdout: next.stdout,
+      stderr: next.stderr ?? "",
+      exitCode: next.exitCode ?? 0,
+      timedOut: next.timedOut ?? false
+    };
+  });
+}
+
+describe("tool handlers", () => {
+  it("summarizes repository instruction context", async () => {
+    const workspace = await tempWorkspace();
+    const result = await summarizeRepoContextHandler({
+      workspacePath: workspace,
+      includeFiles: [],
+      maxChars: 10_000
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("AGENTS.md");
+    expect(result.content[0].text).toContain("GEMINI.md");
+    expect(result.content[0].text).toContain("Run npm test");
+  });
+
+  it("calls codex exec for planning and stores the plan", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("# Plan\n\n- Step 1");
+    const result = await planWithCodexHandler(
+      {
+        workspacePath: workspace,
+        goal: "Add MCP server",
+        constraints: "TypeScript",
+        doneWhen: "Tests pass",
+        reasoningLevel: "medium"
+      },
+      runner
+    );
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("# Plan");
+    expect(runner).toHaveBeenCalledWith(
+      resolveCliInvocation("codex").command,
+      expect.arrayContaining([
+        ...resolveCliInvocation("codex").prefixArgs,
+        "exec",
+        "--sandbox",
+        "read-only"
+      ]),
+      expect.objectContaining({ cwd: workspace })
+    );
+    const planPath = path.join(
+      workspace,
+      "docs",
+      "superpowers",
+      "plans",
+      `${new Date().toISOString().slice(0, 10)}-add-mcp-server.md`
+    );
+    expect(await readFile(planPath, "utf8")).toContain("# Plan");
+  });
+
+  it("calls codex exec for review", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("No findings.");
+    const result = await reviewWithCodexHandler(
+      { workspacePath: workspace, reviewScope: "working-tree", focus: "correctness" },
+      runner
+    );
+    expect(result.content[0].text).toContain("No findings.");
+  });
+
+  it("calls codex exec for debugging", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("Likely cause: parser changed.");
+    const result = await debugWithCodexHandler(
+      {
+        workspacePath: workspace,
+        symptom: "test failure",
+        commandOutput: "expected true got false",
+        recentChanges: "parser edit"
+      },
+      runner
+    );
+    expect(result.content[0].text).toContain("Likely cause");
+  });
+
+  it("does not run verification commands without explicit permission", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("Verification plan");
+    const result = await verifyWithCodexHandler(
+      {
+        workspacePath: workspace,
+        expectedBehavior: "Build passes",
+        verificationCommands: ["npm test"],
+        allowCommandExecution: false
+      },
+      runner
+    );
+    expect(result.content[0].text).toContain("Verification plan");
+    expect(runner).toHaveBeenCalledWith(
+      resolveCliInvocation("codex").command,
+      expect.arrayContaining([
+        ...resolveCliInvocation("codex").prefixArgs,
+        "exec",
+        "--sandbox",
+        "read-only"
+      ]),
+      expect.objectContaining({ cwd: workspace })
+    );
+  });
+
+  it("runs verification commands when allowed", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("PASS");
+    const result = await verifyWithCodexHandler(
+      {
+        workspacePath: workspace,
+        expectedBehavior: "Build passes",
+        verificationCommands: ["node --version"],
+        allowCommandExecution: true
+      },
+      runner
+    );
+    expect(result.content[0].text).toContain("node --version");
+    expect(result.content[0].text).toContain("PASS");
+  });
+
+    it("detects command failure from non-zero exit code", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: "FAIL", exitCode: 1 },
+        { stdout: "Assessment: Command failed with exit code 1" }
+      ]);
+      const result = await verifyWithCodexHandler(
+        {
+          workspacePath: workspace,
+          expectedBehavior: "Tests pass",
+          verificationCommands: ["npm test"],
+          allowCommandExecution: true
+        },
+        runner
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Exit code: 1");
+      expect(result.content[0].text).toContain("Command result: FAILED");
+    });
+
+    it("rejects shell operators in verification commands", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("unused");
+    const result = await verifyWithCodexHandler(
+      {
+        workspacePath: workspace,
+        expectedBehavior: "Command is safe",
+        verificationCommands: ["echo safe & whoami"],
+        allowCommandExecution: true
+      },
+      runner
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Shell operators are not supported");
+  });
+
+  it("rejects gemini execution without explicit permission", async () => {
+    const workspace = await tempWorkspace();
+    const result = await runGeminiCodingTaskHandler({
+      workspacePath: workspace,
+      prompt: "Edit files",
+      allowExecution: false
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("allowExecution");
+  });
+
+  it("uses a configurable long timeout for Gemini coding tasks", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner('{"response":"implemented"}');
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement Task 2",
+        allowExecution: true,
+        timeoutSeconds: 900
+      },
+      runner
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(runner).toHaveBeenCalledWith(
+      resolveCliInvocation("antigravity").command,
+      expect.arrayContaining([
+        ...resolveCliInvocation("antigravity").prefixArgs,
+        "--print",
+        "Implement Task 2"
+      ]),
+      expect.objectContaining({ cwd: workspace, timeoutMs: 900_000 })
+    );
+  });
+
+  it("rejects unsupported legacy models with an error", async () => {
+    const workspace = await tempWorkspace();
+    const runner = fakeRunner("");
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Fix review findings",
+        allowExecution: true,
+        model: "gemini-3.1-pro-preview"
+      },
+      runner
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Failed to run coding task");
+  });
+
+  it("returns contract_failed if strict preflight fails (non-Git)", async () => {
+    const workspace = await tempWorkspace();
+    const runner = sequencedRunner([
+      { stdout: "", exitCode: 128 } // git rev-parse --git-dir fails
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true
+      },
+      runner
+    );
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe("contract_failed");
+    expect(payload.model).toBe("gemini-3.5-flash");
+    expect(runner).toHaveBeenCalledTimes(1); // Only git rev-parse --git-dir
+  });
+
+  it("returns contract_failed if workspace is dirty before strict execution", async () => {
+    const workspace = await tempWorkspace();
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: " M src/a.ts\n" }
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true,
+        requireCleanWorkspace: true
+      },
+      runner
+    );
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe("contract_failed");
+    expect(payload.summary).toContain("clean");
+    expect(payload.model).toBe("gemini-3.5-flash");
+    expect(runner).toHaveBeenCalledTimes(3);
+  });
+
+  it("executes strict contract successfully and verifies evidence", async () => {
+    const workspace = await tempWorkspace();
+    const report = {
+      status: "committed",
+      summary: "Done A",
+      commitSha: "bbb",
+      changedFiles: ["src/a.ts", "tests/a.test.ts"],
+      acceptanceMatrix: [{ criterionId: "AC-1", testNames: ["test"], result: "PASS" }]
+    };
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: "" }, // clean status
+      { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+      { stdout: "bbb\n" }, // postflight HEAD
+      { stdout: "" }, // postflight status
+      { stdout: "src/a.ts\ntests/a.test.ts\n" } // postflight changed files
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement A",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true,
+        requireCommit: true,
+        acceptanceCriteria: [{ id: "AC-1", description: "A works" }],
+        allowedFiles: ["src/a.ts", "tests/a.test.ts"]
+      },
+      runner
+    );
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe("committed");
+    expect(payload.finalHead).toBe("bbb");
+    expect(payload.changedFiles).toEqual(["src/a.ts", "tests/a.test.ts"]);
+    expect(payload.transcriptPath).toBeDefined();
+    expect(runner).toHaveBeenCalledWith(
+      resolveCliInvocation("antigravity").command,
+      expect.arrayContaining(["--dangerously-skip-permissions"]),
+      expect.anything()
+    );
+  });
+
+  it("returns mode_mismatch if Gemini asks for approval", async () => {
+    const workspace = await tempWorkspace();
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: JSON.stringify({ response: "Please approve the plan." }) },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: "" }
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true
+      },
+      runner
+    );
+    expect(JSON.parse(result.content[0].text).status).toBe("mode_mismatch");
+  });
+
+  it("returns contract_failed if forbidden files are changed", async () => {
+    const workspace = await tempWorkspace();
+    const report = {
+      status: "tests_passed",
+      summary: "Done",
+      changedFiles: ["src/forbidden.ts"],
+      acceptanceMatrix: []
+    };
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: "src/forbidden.ts\n" }
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true,
+        allowedFiles: ["src/allowed.ts"]
+      },
+      runner
+    );
+    expect(JSON.parse(result.content[0].text).status).toBe("contract_failed");
+    expect(JSON.parse(result.content[0].text).violations[0]).toContain("outside allowlist");
+  });
+
+  it("returns contract_failed if required commit is missing", async () => {
+    const workspace = await tempWorkspace();
+    const report = {
+      status: "committed",
+      summary: "Done",
+      commitSha: "bbb",
+      changedFiles: ["src/a.ts"],
+      acceptanceMatrix: []
+    };
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+      { stdout: "aaa\n" }, // HEAD did not advance
+      { stdout: "" },
+      { stdout: "src/a.ts\n" }
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true,
+        requireCommit: true
+      },
+      runner
+    );
+    expect(JSON.parse(result.content[0].text).status).toBe("contract_failed");
+    expect(JSON.parse(result.content[0].text).violations[0]).toContain("commit was required");
+  });
+
+  it("returns timed_out if Gemini times out", async () => {
+    const workspace = await tempWorkspace();
+    const runner = sequencedRunner([
+      { stdout: ".git\n" },
+      { stdout: "aaa\n" },
+      { stdout: "" },
+      { stdout: "", timedOut: true, exitCode: 1 }
+    ]);
+    const result = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: workspace,
+        prompt: "Implement",
+        allowExecution: true,
+        mode: "execute",
+        planApproved: true
+      },
+      runner
+    );
+    expect(JSON.parse(result.content[0].text).status).toBe("timed_out");
+  });
+
+  it("returns the same structured workspace rejection from context and coding tools", async () => {
+    const allowed = await tempWorkspace();
+    const outside = await mkdtemp(path.join(tmpdir(), "sp-outside-"));
+    created.push(outside);
+    process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = allowed;
+    const runner = fakeRunner("must not run");
+
+    const contextResult = await summarizeRepoContextHandler({
+      workspacePath: outside
+    });
+    const codingResult = await runGeminiCodingTaskHandler(
+      {
+        workspacePath: outside,
+        prompt: "Do not run",
+        allowExecution: true
+      },
+      runner
+    );
+
+    const contextPayload = JSON.parse(contextResult.content[0].text);
+    const codingPayload = JSON.parse(codingResult.content[0].text);
+    expect(contextResult.isError).toBe(true);
+    expect(codingResult.isError).toBe(true);
+    expect(contextPayload.errorCode).toBe("workspace_not_allowed");
+    expect(codingPayload.errorCode).toBe("workspace_not_allowed");
+    expect(codingPayload).toMatchObject({
+      status: "rejected",
+      stage: "workspace_validation",
+      geminiStarted: false,
+      modelInvoked: false,
+      filesModified: false
+    });
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("returns structured workspace rejection from other repository tools", async () => {
+    const allowed = await tempWorkspace();
+    const outside = await mkdtemp(path.join(tmpdir(), "sp-outside-other-"));
+    created.push(outside);
+    process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = allowed;
+    const runner = fakeRunner("must not run");
+
+    const tools = [
+      () => planWithCodexHandler({
+        workspacePath: outside,
+        goal: "Plan",
+        constraints: "",
+        doneWhen: "Done"
+      }, runner),
+      () => reviewWithCodexHandler({
+        workspacePath: outside,
+        reviewScope: "working-tree"
+      }, runner),
+      () => debugWithCodexHandler({
+        workspacePath: outside,
+        symptom: "Failure",
+        commandOutput: "Output"
+      }, runner),
+      () => verifyWithCodexHandler({
+        workspacePath: outside,
+        expectedBehavior: "Pass",
+        verificationCommands: [],
+        allowCommandExecution: false
+      }, runner)
+    ];
+
+    for (const call of tools) {
+      const result = await call();
+      expect(result.isError).toBe(true);
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload).toMatchObject({
+        status: "rejected",
+        stage: "workspace_validation",
+        errorCode: "workspace_not_allowed",
+        geminiStarted: false,
+        modelInvoked: false,
+        filesModified: false
+      });
+    }
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("returns workspace, Git, and Gemini capability preflight", async () => {
+    const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: `${workspace}\n` },
+        { stdout: "1.0.8\n" }
+      ]);
+
+      const result = await validateWorkspaceHandler(
+        {
+          workspacePath: workspace,
+          checkGit: true,
+          checkAntigravityCli: true
+        },
+        runner
+      );
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(result.isError).toBeUndefined();
+      expect(payload).toMatchObject({
+        status: "allowed",
+        stage: "workspace_validation",
+        gitRoot: workspace,
+        antigravityCliAvailable: true,
+        antigravityCliVersion: "1.0.8",
+        antigravityExecutable: expect.stringContaining("agy"),
+        geminiCliAvailable: false,
+        agentStarted: false,
+        modelInvoked: false,
+        filesModified: false
+      });
+      expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an allowed workspace allowed when optional capabilities are unavailable", async () => {
+    const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: "", stderr: "not a git repository", exitCode: 128 },
+        { stdout: "", stderr: "antigravity missing", exitCode: 1 }
+      ]);
+
+      const result = await validateWorkspaceHandler(
+        { workspacePath: workspace },
+        runner
+      );
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.status).toBe("allowed");
+      expect(payload.gitRoot).toBeUndefined();
+      expect(payload.antigravityCliAvailable).toBe(false);
+      expect(payload.geminiCliAvailable).toBe(false);
+  });
+
+  it("returns structured workspace rejection from validateWorkspaceHandler", async () => {
+    const allowed = await tempWorkspace();
+    const outside = await mkdtemp(path.join(tmpdir(), "sp-outside-validate-"));
+    created.push(outside);
+    process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = allowed;
+    const runner = fakeRunner("must not run");
+
+    const result = await validateWorkspaceHandler(
+      { workspacePath: outside },
+      runner
+    );
+
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toMatchObject({
+      status: "rejected",
+      stage: "workspace_validation",
+      errorCode: "workspace_not_allowed",
+      geminiStarted: false,
+      modelInvoked: false,
+      filesModified: false
+    });
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  describe("runCodingTaskHandler", () => {
+    it("resolves the model through the Antigravity adapter for native models", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaa\n" },
+        { stdout: "" },
+        { stdout: `Created conversation 12345678-1234-1234-1234-123456789012` },
+        { stdout: "aaa\n" },
+        { stdout: "" },
+        { stdout: "" }
+      ]);
+      await runCodingTaskHandler(
+        {
+          workspacePath: workspace,
+          prompt: "Fix it",
+          allowExecution: true,
+          model: "Gemini 3.5 Flash (Medium)"
+        },
+        runner
+      );
+      
+      expect(runner).toHaveBeenCalledWith(
+        resolveCliInvocation("antigravity").command,
+        expect.arrayContaining(["--model", "Gemini 3.5 Flash (Medium)"]),
+        expect.anything()
+      );
+    });
+
+    it("rejects unsupported legacy models with an error", async () => {
+      const workspace = await tempWorkspace();
+      const runner = fakeRunner("");
+      const result = await runCodingTaskHandler(
+        {
+          workspacePath: workspace,
+          prompt: "Fix it",
+          allowExecution: true,
+          model: "gemini-3.1-pro-preview"
+        },
+        runner
+      );
+      
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Failed to run coding task");
+    });
+  });
+
+  describe("reviewCodeQualityHandler", () => {
+    it("scans workspace TypeScript files for structural issues", async () => {
+      const workspace = await tempWorkspace();
+      const srcDir = path.join(workspace, "src");
+      await mkdir(srcDir, { recursive: true });
+      await writeFile(path.join(srcDir, "test.ts"), [
+        'const x: any = "hello";',
+        "console.log(x);",
+        "// TODO: refactor this"
+      ].join("\n"));
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace
+      });
+
+      expect(result.isError).toBeUndefined();
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.summary.filesScanned).toBeGreaterThanOrEqual(1);
+      expect(Array.isArray(payload.findings)).toBe(true);
+    });
+
+    it("rejects workspace outside allowed roots", async () => {
+      const allowed = await tempWorkspace();
+      const outside = await mkdtemp(path.join(tmpdir(), "sp-rq-outside-"));
+      created.push(outside);
+      process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = allowed;
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: outside
+      });
+
+      expect(result.isError).toBe(true);
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.errorCode).toBe("workspace_not_allowed");
+    });
+
+    it("rejects files with absolute paths outside workspace", async () => {
+      const workspace = await tempWorkspace();
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace,
+        files: ["C:\\Windows\\System32\\evil.ts"]
+      });
+
+      expect(result.isError).toBeUndefined();
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.errors).toBeDefined();
+      expect(payload.errors.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe("runDevelopmentWorkflowHandler", () => {
+    it("retries review after fix and marks all stages as ok when clean", async () => {
+      const workspace = await tempWorkspace();
+      await writeFile(path.join(workspace, "AGENTS.md"), "- Run npm test");
+      // Each round needs a report whose commitSha matches its postflight HEAD
+      const runner = sequencedRunner([
+        // implement round: preflight 3 + antigravity 1 + postflight 3 = 7
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({ status: "committed", summary: "done", commitSha: "bbbb", changedFiles: [], acceptanceMatrix: [] }) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        // review round 1: git diff 1 + codex exec 1 = 2 (has findings)
+        { stdout: "" },
+        { stdout: "## Findings\n- **Issue 1:** test" },
+        // fix round: preflight 3 + antigravity 1 + postflight 3 = 7
+        { stdout: ".git\n" },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({ status: "committed", summary: "fixed", commitSha: "cccc", changedFiles: [], acceptanceMatrix: [] }) }) },
+        { stdout: "cccc\n" },
+        { stdout: "" },
+        { stdout: "" },
+        // review round 2: git diff 1 + codex exec 1 = 2 (no findings)
+        { stdout: "" },
+        { stdout: "No issues found." }
+      ]);
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Fix issues",
+          skipPlan: true,
+          skipReview: false,
+          skipVerify: true
+        },
+        runner
+      );
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("completed");
+      expect(payload.stages).toHaveLength(4);
+      expect(payload.stages[0].stage).toBe("implement");
+      expect(payload.stages[0].ok).toBe(true);
+      expect(payload.stages[1].stage).toBe("review");
+      expect(payload.stages[1].ok).toBe(true); // retroactively marked ok
+      expect(payload.stages[1].summary).toBe("Issues resolved in subsequent fix round.");
+      expect(payload.stages[2].stage).toBe("fix_round_1");
+      expect(payload.stages[2].ok).toBe(true);
+      expect(payload.stages[3].stage).toBe("review_round_2");
+      expect(payload.stages[3].ok).toBe(true);
+    });
+
+    it("marks review as failed when Codex review execution errors", async () => {
+      const workspace = await tempWorkspace();
+      await writeFile(path.join(workspace, "AGENTS.md"), "- Run npm test");
+      const report = {
+        status: "committed",
+        summary: "done",
+        commitSha: "bbbb",
+        changedFiles: [],
+        acceptanceMatrix: []
+      };
+      const runner = sequencedRunner([
+        // implement round: preflight 3 + antigravity 1 + postflight 3 = 7
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        // review: git diff 1 + codex exec 1 with exitCode 1 = 2
+        { stdout: "" },
+        { stdout: "Codex review failed", exitCode: 1 }
+      ]);
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Fix things",
+          skipPlan: true,
+          skipReview: false,
+          skipVerify: true
+        },
+        runner
+      );
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("completed_with_issues");
+      expect(payload.stages).toHaveLength(2);
+      expect(payload.stages[0].stage).toBe("implement");
+      expect(payload.stages[0].ok).toBe(true);
+      expect(payload.stages[1].stage).toBe("review");
+      expect(payload.stages[1].ok).toBe(false);
+      expect(payload.stages[1].summary).toBe("Codex review execution failed.");
+    });
+
+    it("returns completed_with_issues when workspace is outside allowed roots", async () => {
+      const allowed = await tempWorkspace();
+      const outside = await mkdtemp(path.join(tmpdir(), "sp-devflow-outside-"));
+      created.push(outside);
+      process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS = allowed;
+      const runner = fakeRunner("must not run");
+
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: outside,
+          goal: "Do not run",
+          skipPlan: true,
+          skipReview: true,
+          skipVerify: true
+        },
+        runner
+      );
+
+      expect(result.isError).toBeUndefined();
+      const payload = JSON.parse(result.content[0].text);
+      // With skipPlan, the implement stage runs and fails with workspace rejection
+      expect(payload.workflow).toBe("completed_with_issues");
+      expect(payload.stages[0].stage).toBe("implement");
+      expect(payload.stages[0].ok).toBe(false);
+    });
+  });
+
+  describe("server registration", () => {
+    it("exposes both legacy and canonical coding task tools", async () => {
+      const { createServer } = await import("../src/index.js");
+      const server = createServer();
+      
+      // Use internal _registeredTools property or similar
+      const tools = (server as any)._registeredTools;
+      const names = tools ? Object.keys(tools) : [];
+
+      expect(names).toContain("run_antigravity_coding_task");
+      expect(names).toContain("run_gemini_coding_task");
+    });
+  });
+});

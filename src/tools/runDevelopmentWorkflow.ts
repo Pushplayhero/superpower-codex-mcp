@@ -1,0 +1,287 @@
+import { readFile } from "node:fs/promises";
+import { z } from "zod";
+import type { CommandRunner } from "../lib/command.js";
+import { runCommand } from "../lib/command.js";
+import {
+  errorResult,
+  textResult,
+  type McpTextResult
+} from "../lib/mcp.js";
+import { planWithCodexHandler } from "./planWithCodex.js";
+import { runCodingTaskHandler } from "./runCodingTask.js";
+import { reviewWithCodexHandler } from "./reviewWithCodex.js";
+import { verifyWithCodexHandler } from "./verifyWithCodex.js";
+import { planOutputPath } from "../lib/workspace.js";
+
+export const runDevelopmentWorkflowSchema = {
+  workspacePath: z.string().describe("Repository or workspace path."),
+  goal: z.string().min(1).describe("Implementation goal."),
+  constraints: z.string().default("").describe("Constraints the plan must respect."),
+  doneWhen: z.string().default("").describe("Completion criteria."),
+  model: z.string().default("gemini-3.5-flash").describe("Model for coding task."),
+  skipPlan: z.boolean().default(false).describe("Skip planning phase if a plan already exists."),
+  skipReview: z.boolean().default(false).describe("Skip code review phase."),
+  skipVerify: z.boolean().default(false).describe("Skip final verification phase."),
+  maxIterations: z.number().int().min(1).max(10).default(3).describe("Max code-review-fix iterations.")
+};
+
+export type RunDevelopmentWorkflowInput = {
+  workspacePath: string;
+  goal: string;
+  constraints?: string;
+  doneWhen?: string;
+  model?: string;
+  skipPlan?: boolean;
+  skipReview?: boolean;
+  skipVerify?: boolean;
+  maxIterations?: number;
+};
+
+function hasFindings(reviewText: string): boolean {
+  const lines = reviewText.split("\n");
+  let inFindings = false;
+  let findingCount = 0;
+  for (const line of lines) {
+    if (/^#{1,3}\s*findings/i.test(line)) {
+      inFindings = true;
+      continue;
+    }
+    if (inFindings) {
+      if (/^#{1,3}/.test(line) && !/findings/i.test(line)) break;
+      if (/^-\s*\*\*/.test(line)) findingCount++;
+    }
+  }
+  return findingCount > 0;
+}
+
+type StageResult = {
+  stage: string;
+  ok: boolean;
+  summary: string;
+  details?: string;
+};
+
+export async function runDevelopmentWorkflowHandler(
+  input: RunDevelopmentWorkflowInput,
+  runner: CommandRunner = runCommand
+): Promise<McpTextResult> {
+  const stages: StageResult[] = [];
+  let planText = "";
+
+  if (!input.skipPlan) {
+    const planResult = await planWithCodexHandler(
+      {
+        workspacePath: input.workspacePath,
+        goal: input.goal,
+        constraints: input.constraints ?? "",
+        doneWhen: input.doneWhen ?? ""
+      },
+      runner
+    );
+    stages.push({
+      stage: "plan",
+      ok: !planResult.isError,
+      summary: planResult.isError ? "Codex planning failed." : "Plan created.",
+      details: planResult.content[0].text
+    });
+    if (planResult.isError) {
+      return textResult(JSON.stringify({ workflow: "failed", stages }, null, 2));
+    }
+
+    // Read the saved plan for passing to implementer
+    try {
+      const savedPath = planOutputPath(input.workspacePath, input.goal);
+      planText = await readFile(savedPath, "utf8");
+    } catch {
+      planText = planResult.content[0].text;
+    }
+  }
+
+  // Build implementer prompt with full plan, constraints, and doneWhen
+  const implementPrompt = [
+    input.goal,
+    input.constraints ? `\nConstraints:\n${input.constraints}` : "",
+    input.doneWhen ? `\nDone when:\n${input.doneWhen}` : "",
+    planText ? `\nImplementation plan:\n${planText}` : ""
+  ].filter(Boolean).join("\n");
+
+  let implementResult = await runCodingTaskHandler(
+    {
+      workspacePath: input.workspacePath,
+      prompt: implementPrompt,
+      allowExecution: true,
+      mode: "execute",
+      planApproved: true,
+      model: input.model
+    },
+    runner
+  );
+
+  let implementOk = !implementResult.isError;
+  let implementStatus = "executed";
+
+  if (!implementResult.isError) {
+    try {
+      const payload = JSON.parse(implementResult.content[0].text);
+      implementStatus = payload.status ?? "unknown";
+      implementOk = payload.status === "committed" || payload.status === "tests_passed";
+    } catch {
+      implementOk = false;
+    }
+  }
+
+  stages.push({
+    stage: "implement",
+    ok: implementOk,
+    summary: `Status: ${implementStatus}`,
+    details: implementResult.content[0].text
+  });
+
+  // Stop if implementation failed
+  if (!implementOk) {
+    return textResult(JSON.stringify({
+      workflow: "completed_with_issues",
+      stages
+    }, null, 2));
+  }
+
+  let reviewText = "";
+  if (!input.skipReview) {
+    for (let i = 0; i < (input.maxIterations ?? 3); i++) {
+      const reviewResult = await reviewWithCodexHandler(
+        {
+          workspacePath: input.workspacePath,
+          reviewScope: "diff",
+          focus: input.goal
+        },
+        runner
+      );
+      reviewText = reviewResult.content[0].text;
+      const findings = hasFindings(reviewText);
+
+      // Check for Codex execution failure
+      const reviewFailed = reviewResult.isError === true;
+      stages.push({
+        stage: i === 0 ? "review" : `review_round_${i + 1}`,
+        ok: !reviewFailed && !findings,
+        summary: reviewFailed ? "Codex review execution failed." : findings ? `${extractFindingCount(reviewText)} issues found.` : "No issues found.",
+        details: reviewText
+      });
+
+      if (reviewFailed || !findings) break;
+
+      if (i < (input.maxIterations ?? 3) - 1) {
+        const fixPrompt = `${input.goal}\n\nAddress these review findings:\n${reviewText}`;
+        implementResult = await runCodingTaskHandler(
+          {
+            workspacePath: input.workspacePath,
+            prompt: fixPrompt,
+            allowExecution: true,
+            mode: "execute",
+            planApproved: true,
+            model: input.model
+          },
+          runner
+        );
+        const fixOk = !implementResult.isError && parseImplementOk(implementResult.content[0].text);
+        stages.push({
+          stage: `fix_round_${i + 1}`,
+          ok: fixOk,
+          summary: fixOk ? "Fix applied." : "Fix failed.",
+          details: implementResult.content[0].text
+        });
+
+        // If fix failed, stop the review loop
+        if (!fixOk) {
+          break;
+        }
+      }
+    }
+
+    // Retroactively mark all review stages as ok=true if a subsequent clean review round exists
+    // Handles: review(false) → fix_round(true) → review_round_2(true)
+    for (let idx = 0; idx < stages.length; idx++) {
+      const s = stages[idx];
+      if (!s.stage.startsWith("review") || s.ok) continue;
+      // This review stage had findings. Check if a later review stage is ok=true
+      const laterCleanReview = stages.slice(idx + 1).find(
+        (later) => later.stage.startsWith("review") && later.ok
+      );
+      if (laterCleanReview) {
+        s.ok = true;
+        s.summary = "Issues resolved in subsequent fix round.";
+      }
+    }
+  }
+
+  if (!input.skipVerify) {
+    // Run actual verification commands and check content
+    const verifyResult = await verifyWithCodexHandler(
+      {
+        workspacePath: input.workspacePath,
+        expectedBehavior: input.goal,
+        verificationCommands: ["npm test", "npm run typecheck"],
+        allowCommandExecution: true
+      },
+      runner
+    );
+
+    // Check verification content for pass/fail signals
+    const resultText = verifyResult.content[0].text;
+    const hasFailure = detectVerificationFailure(resultText);
+    const isCodexError = verifyResult.isError === true;
+
+    stages.push({
+      stage: "verify",
+      ok: !isCodexError && !hasFailure,
+      summary: isCodexError ? "Verification execution error." : hasFailure ? "Verification identified issues." : "Verification passed.",
+      details: resultText
+    });
+  }
+
+  const workflowOk = stages.every((s) => s.ok);
+  return textResult(JSON.stringify({
+    workflow: workflowOk ? "completed" : "completed_with_issues",
+    stages
+  }, null, 2));
+}
+
+function extractFindingCount(text: string): string {
+  const match = text.match(/(\d+)\s+issue/i);
+  if (match) return match[0];
+  const count = (text.match(/-\s*\*\*/g) || []).length;
+  return `${count} potential`;
+}
+
+function parseImplementOk(text: string): boolean {
+  try {
+    const payload = JSON.parse(text);
+    const status = payload.status ?? "";
+    return status === "committed" || status === "tests_passed";
+  } catch {
+    return false;
+  }
+}
+
+function detectVerificationFailure(text: string): boolean {
+  // Check for explicit failure signals in the verification output
+  const failurePatterns = [
+    /exit code:\s*[1-9]\d*/i,      // "Exit code: 1" or higher
+    /command result:\s*FAILED/i,     // Explicit FAILED marker
+    /(?:^|\n)#+\s*findings/i,       // Findings section heading
+    /\b(?:fail(?:ed|ure|s)?|unsuccessful)\b/i,  // fail/failed/failure/failures/unsuccessful
+    /\b(?:error|erroring|errored)\b/i,           // error/errors
+  ];
+
+  // Negation patterns that indicate "no issues"
+  const negationPatterns = [
+    /no (?:issues|errors|problems|failures)/i,
+    /all (?:tests|checks|commands?)? passed/i,
+    /everything (?:looks|is) (?:good|fine|ok|clean)/i
+  ];
+
+  const hasFailure = failurePatterns.some((p) => p.test(text));
+  const hasNegation = negationPatterns.some((p) => p.test(text));
+
+  return hasFailure && !hasNegation;
+}
