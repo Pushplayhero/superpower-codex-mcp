@@ -382,3 +382,34 @@ The design is implemented when:
 6. Default responses are concise and full diagnostics are saved to disk.
 7. Gemini cannot claim `review_passed`.
 8. All required tests, type checking, and build commands pass.
+
+## Workflow Diagnostics and Legacy Deprecation
+
+### Workflow Statuses
+
+- `completed`: Every recorded stage completed successfully.
+- `completed_with_issues`: Implementation ran, but one or more later stages did
+  not complete successfully.
+- `failed`: The workflow could not pass an early prerequisite such as planning.
+
+### Workflow Diagnostics
+
+When the `run_development_workflow` orchestration tool encounters a failure in
+any stage, it includes the following diagnostic fields at the top level of the
+JSON payload to assist with automated next steps:
+
+- `failedStage` (string): The identifier of the first failing stage (e.g. `"plan"`, `"implement"`, `"review"`, `"verify"`).
+- `nextAction` (string): A recommended action to resolve the failure associated with that specific stage.
+
+### Legacy Deprecation
+
+Structured JSON responses from the deprecated `run_gemini_coding_task` alias
+include a top-level machine-readable `deprecation` object pointing to the
+canonical replacement `run_antigravity_coding_task`:
+
+```json
+"deprecation": {
+  "message": "run_gemini_coding_task is deprecated. Please use run_antigravity_coding_task instead.",
+  "replacement": "run_antigravity_coding_task"
+}
+```

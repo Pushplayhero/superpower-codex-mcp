@@ -6,7 +6,9 @@ import { isPathInside, requireWorkspace } from "../lib/workspace.js";
 
 export const reviewCodeQualitySchema = {
   workspacePath: z.string().describe("Repository or workspace path to scan."),
-  files: z.array(z.string()).optional().describe("Specific file paths (relative to workspace). Default: all src/**/*.ts."),
+  files: z.array(z.string()).optional().describe(
+    "Specific file paths (relative to workspace). Default: all src/**/*.ts plus tests/**/*.ts."
+  ),
   checks: z.array(z.string()).optional().describe("Specific checks to run. Default: all."),
   maxFindings: z.number().int().min(1).max(500).default(100).describe("Max findings to return.")
 };
@@ -213,8 +215,9 @@ const ALL_CHECKS: Record<string, { name: string; severity: Severity; description
 
 function resolveFiles(workspacePath: string, inputFiles?: string[]): { files: string[], errors: string[] } {
   const errors: string[] = [];
+  const filesSet = new Set<string>();
+
   if (inputFiles && inputFiles.length > 0) {
-    const files: string[] = [];
     for (const f of inputFiles) {
       if (isAbsolute(f)) {
         errors.push(`Absolute paths not allowed; use relative paths: ${f}`);
@@ -226,21 +229,30 @@ function resolveFiles(workspacePath: string, inputFiles?: string[]): { files: st
         continue;
       }
       if (existsSync(resolved)) {
-        files.push(f);
+        const norm = relative(workspacePath, resolved).replace(/\\/g, "/");
+        filesSet.add(norm);
       } else {
         errors.push(`File not found: ${f}`);
       }
     }
-    return { files, errors };
+  } else {
+    const prefix = workspacePath.endsWith("/") || workspacePath.endsWith("\\")
+      ? workspacePath
+      : `${workspacePath}/`;
+    const patternSrc = `${prefix}src/**/*.ts`;
+    const patternTests = `${prefix}tests/**/*.ts`;
+
+    for (const f of [
+      ...globSync(patternSrc.replace(/\\/g, "/")),
+      ...globSync(patternTests.replace(/\\/g, "/"))
+    ]) {
+      const norm = relative(workspacePath, f).replace(/\\/g, "/");
+      filesSet.add(norm);
+    }
   }
-  const pattern = workspacePath.endsWith("/") || workspacePath.endsWith("\\")
-    ? `${workspacePath}src/**/*.ts`
-    : `${workspacePath}/src/**/*.ts`;
-  return {
-    files: globSync(pattern.replace(/\\/g, "/"))
-      .map((f) => relative(workspacePath, f)),
-    errors
-  };
+
+  const sortedFiles = Array.from(filesSet).sort();
+  return { files: sortedFiles, errors };
 }
 
 export async function reviewCodeQualityHandler(

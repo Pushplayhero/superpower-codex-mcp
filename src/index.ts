@@ -5,6 +5,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { runCodingTaskSchema } from "./lib/codingTaskContract.js";
 import { runCodingTaskHandler } from "./tools/runCodingTask.js";
 import {
+  runGeminiCodingTaskHandler,
+  runGeminiCodingTaskSchema
+} from "./tools/runGeminiCodingTask.js";
+import {
   runDevelopmentWorkflowHandler,
   runDevelopmentWorkflowSchema
 } from "./tools/runDevelopmentWorkflow.js";
@@ -96,8 +100,8 @@ export function createServer(): McpServer {
     "run_gemini_coding_task",
     "Deprecated compatibility alias for run_antigravity_coding_task. " +
       `Invokes Antigravity CLI for coding. ${COMMON_DESCRIPTION}`,
-    runCodingTaskSchema,
-    (input) => runCodingTaskHandler(input)
+    runGeminiCodingTaskSchema,
+    (input) => runGeminiCodingTaskHandler(input)
   );
 
   server.tool(

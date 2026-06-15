@@ -78,7 +78,7 @@ export async function runDevelopmentWorkflowHandler(
       details: planResult.content[0].text
     });
     if (planResult.isError) {
-      return textResult(JSON.stringify({ workflow: "failed", stages }, null, 2));
+      return buildWorkflowResponse("failed", stages);
     }
 
     // Read the saved plan for passing to implementer
@@ -132,10 +132,7 @@ export async function runDevelopmentWorkflowHandler(
 
   // Stop if implementation failed
   if (!implementOk) {
-    return textResult(JSON.stringify({
-      workflow: "completed_with_issues",
-      stages
-    }, null, 2));
+    return buildWorkflowResponse("completed_with_issues", stages);
   }
 
   let reviewText = "";
@@ -237,14 +234,43 @@ export async function runDevelopmentWorkflowHandler(
     stages.push({
       stage: "verify",
       ok: !isCodexError && !hasFailure,
-      summary: isCodexError ? "Verification execution error." : hasFailure ? "Verification identified issues." : "Verification passed.",
+      summary: isCodexError
+        ? "Verification execution error."
+        : hasFailure
+          ? "Verification identified issues."
+          : "Verification passed.",
       details: resultText
     });
   }
 
   const workflowOk = stages.every((s) => s.ok);
+  return buildWorkflowResponse(workflowOk ? "completed" : "completed_with_issues", stages);
+}
+
+function buildWorkflowResponse(workflow: string, stages: StageResult[]): McpTextResult {
+  const firstFailed = stages.find((s) => !s.ok);
+  if (firstFailed) {
+    let nextAction = "Review the stage details and address any issues.";
+    if (firstFailed.stage === "plan") {
+      nextAction = "Verify the goals and constraints or retry planning.";
+    } else if (firstFailed.stage === "implement") {
+      nextAction = "Revise the implementation prompt or check the model status.";
+    } else if (firstFailed.stage.startsWith("review")) {
+      nextAction = "Address the outstanding code quality or architectural findings.";
+    } else if (firstFailed.stage.startsWith("fix_round")) {
+      nextAction = "Inspect the fix round failures and resolve implementation conflicts.";
+    } else if (firstFailed.stage === "verify") {
+      nextAction = "Fix the failing tests or type errors reported in verification details.";
+    }
+    return textResult(JSON.stringify({
+      workflow,
+      stages,
+      failedStage: firstFailed.stage,
+      nextAction
+    }, null, 2));
+  }
   return textResult(JSON.stringify({
-    workflow: workflowOk ? "completed" : "completed_with_issues",
+    workflow,
     stages
   }, null, 2));
 }

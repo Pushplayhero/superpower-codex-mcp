@@ -168,6 +168,49 @@ Supported model names:
 Unsupported legacy Gemini model names are rejected. The server does not
 automatically retry with a stronger model.
 
+## Status model and diagnostics
+
+### Coding task statuses
+
+The coding tools (`run_antigravity_coding_task` and the legacy alias
+`run_gemini_coding_task`) return a JSON payload with a `status` field:
+
+- `planned`: A requested planning task was completed.
+- `implemented_unverified`: Files may be implemented, but required test or acceptance evidence is incomplete.
+- `tests_passed`: All supplied acceptance criteria map to named passing tests, but no commit was required or verified.
+- `committed`: Required commit and acceptance evidence were verified successfully.
+- `mode_mismatch`: Execute mode was requested, but the model asked for approval or returned a plan-only response.
+- `contract_failed`: Preconditions or postconditions failed (e.g., dirty workspace before execution, missing commit, output outside `allowedFiles`).
+- `execution_failed`: The tool or a required Git command failed to execute.
+- `timed_out`: Execution exceeded the configured timeout.
+
+### Workflow statuses
+
+- `completed`: Every recorded stage completed successfully.
+- `completed_with_issues`: Implementation ran, but one or more later stages did
+  not complete successfully.
+- `failed`: The workflow could not pass an early prerequisite such as planning.
+
+### Deprecation guidance
+
+Structured JSON responses from the legacy alias `run_gemini_coding_task`
+include a top-level machine-readable `deprecation` object:
+
+```json
+"deprecation": {
+  "message": "run_gemini_coding_task is deprecated. Please use run_antigravity_coding_task instead.",
+  "replacement": "run_antigravity_coding_task"
+}
+```
+
+### Workflow diagnostics
+
+When `run_development_workflow` does not complete cleanly, it returns two
+additional diagnostic fields:
+
+- `failedStage`: The name of the first failing stage (e.g. `"plan"`, `"implement"`, `"review"`, `"verify"`).
+- `nextAction`: A descriptive recommendation on what to do next to resolve the issue.
+
 ## Workspace safety
 
 By default, only the MCP process working directory and its descendants are
@@ -198,7 +241,7 @@ npm.cmd test
 npm.cmd run build
 ```
 
-The verified baseline is 136 passing tests across 9 test files.
+The verified baseline is updated by the verification run below.
 
 ## Updating an existing Windows installation
 

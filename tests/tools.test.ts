@@ -569,13 +569,16 @@ describe("tool handlers", () => {
     expect(codingResult.isError).toBe(true);
     expect(contextPayload.errorCode).toBe("workspace_not_allowed");
     expect(codingPayload.errorCode).toBe("workspace_not_allowed");
-    expect(codingPayload).toMatchObject({
-      status: "rejected",
-      stage: "workspace_validation",
-      geminiStarted: false,
-      modelInvoked: false,
-      filesModified: false
-    });
+      expect(codingPayload).toMatchObject({
+        status: "rejected",
+        stage: "workspace_validation",
+        geminiStarted: false,
+        modelInvoked: false,
+        filesModified: false,
+        deprecation: {
+          replacement: "run_antigravity_coding_task"
+        }
+      });
     expect(runner).not.toHaveBeenCalled();
   });
 
@@ -747,6 +750,79 @@ describe("tool handlers", () => {
       
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Failed to run coding task");
+    });
+  });
+
+  describe("runGeminiCodingTaskHandler deprecation and compatibility", () => {
+    it("adds deprecation metadata only to the legacy alias payload", async () => {
+      const workspace = await tempWorkspace();
+      const report = {
+        status: "committed",
+        summary: "Done A",
+        commitSha: "bbb",
+        changedFiles: ["src/a.ts"],
+        acceptanceMatrix: []
+      };
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaa\n" },
+        { stdout: "" }, // clean status
+        { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+        { stdout: "bbb\n" }, // postflight HEAD
+        { stdout: "" }, // postflight status
+        { stdout: "src/a.ts\n" } // postflight changed files
+      ]);
+
+      const resultGemini = await runGeminiCodingTaskHandler(
+        {
+          workspacePath: workspace,
+          prompt: "Implement A",
+          allowExecution: true,
+          mode: "execute",
+          planApproved: true,
+          requireCommit: true,
+          allowedFiles: ["src/a.ts"]
+        },
+        runner
+      );
+
+      const payloadGemini = JSON.parse(resultGemini.content[0].text);
+      expect(payloadGemini.status).toBe("committed");
+      expect(payloadGemini.changedFiles).toEqual(["src/a.ts"]);
+      expect(payloadGemini.transcriptPath).toBeDefined();
+      expect(payloadGemini.deprecation).toEqual({
+        message: "run_gemini_coding_task is deprecated. Please use run_antigravity_coding_task instead.",
+        replacement: "run_antigravity_coding_task"
+      });
+
+      // Reset runner for canonical runCodingTaskHandler
+      const runner2 = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+        { stdout: "bbb\n" },
+        { stdout: "" },
+        { stdout: "src/a.ts\n" }
+      ]);
+
+      const resultCanonical = await runCodingTaskHandler(
+        {
+          workspacePath: workspace,
+          prompt: "Implement A",
+          allowExecution: true,
+          mode: "execute",
+          planApproved: true,
+          requireCommit: true,
+          allowedFiles: ["src/a.ts"]
+        },
+        runner2
+      );
+
+      const payloadCanonical = JSON.parse(resultCanonical.content[0].text);
+      expect(payloadCanonical.status).toBe("committed");
+      expect(payloadCanonical.changedFiles).toEqual(["src/a.ts"]);
+      expect(payloadCanonical.deprecation).toBeUndefined();
     });
   });
 
@@ -1123,6 +1199,73 @@ describe("tool handlers", () => {
         verificationCommands: []
       });
       expect(parsed.success).toBe(false);
+    });
+
+    it("adds failedStage and nextAction diagnostics on plan failure (early failure path)", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: "Plan failed", exitCode: 1 } // planning command fails
+      ]);
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Do planning",
+          skipPlan: false,
+          skipReview: true,
+          skipVerify: true
+        },
+        runner
+      );
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("failed");
+      expect(payload.stages[0].stage).toBe("plan");
+      expect(payload.stages[0].ok).toBe(false);
+      expect(payload.failedStage).toBe("plan");
+      expect(payload.nextAction).toBe("Verify the goals and constraints or retry planning.");
+    });
+
+    it("adds failedStage and nextAction diagnostics on verification failure (later failure path)", async () => {
+      const workspace = await tempWorkspace();
+      const report = {
+        status: "committed",
+        summary: "done",
+        commitSha: "bbbb",
+        changedFiles: [],
+        acceptanceMatrix: []
+      };
+      const runner = sequencedRunner([
+        // implement
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify(report) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        // verify command exit code non-zero
+        { stdout: "Exit code: 1\nCommand result: FAILED\n# Findings\n- issue", exitCode: 1 }
+      ]);
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Implement goal",
+          skipPlan: true,
+          skipReview: true,
+          skipVerify: false
+        },
+        runner
+      );
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("completed_with_issues");
+      expect(payload.stages).toHaveLength(2);
+      expect(payload.stages[0].stage).toBe("implement");
+      expect(payload.stages[0].ok).toBe(true);
+      expect(payload.stages[1].stage).toBe("verify");
+      expect(payload.stages[1].ok).toBe(false);
+      expect(payload.failedStage).toBe("verify");
+      expect(payload.nextAction).toBe(
+        "Fix the failing tests or type errors reported in verification details."
+      );
     });
   });
 
