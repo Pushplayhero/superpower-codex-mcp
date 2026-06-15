@@ -12,25 +12,116 @@ describe("command helpers", () => {
     expect(commandForDisplay("codex", ["exec", "hello world"])).toBe('codex exec "hello world"');
   });
 
-  it("runs npm CLI entrypoints through node on Windows", () => {
+  it("resolves Codex from PATH on Windows", () => {
+    const codexPath = "C:\\Program Files\\Codex\\codex.exe";
+
     expect(
-      resolveCliInvocation("codex", "win32", {
-        APPDATA: "C:\\Users\\Test\\AppData\\Roaming"
-      })
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: "C:\\missing;C:\\Program Files\\Codex"
+        },
+        (candidate) => candidate === codexPath
+      )
+    ).toEqual({
+      command: codexPath,
+      prefixArgs: []
+    });
+  });
+
+  it("falls back to an existing npm Codex entrypoint on Windows", () => {
+    const entrypoint = path.join(
+      "C:\\Users\\Test\\AppData\\Roaming",
+      "npm",
+      "node_modules",
+      "@openai",
+      "codex",
+      "bin",
+      "codex.js"
+    );
+
+    expect(
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: ""
+        },
+        (candidate) => candidate === entrypoint
+      )
     ).toEqual({
       command: process.execPath,
-      prefixArgs: [
-        path.join(
-          "C:\\Users\\Test\\AppData\\Roaming",
-          "npm",
-          "node_modules",
-          "@openai",
-          "codex",
-          "bin",
-          "codex.js"
-        )
-      ]
+      prefixArgs: [entrypoint]
     });
+  });
+
+  it("skips the Codex Desktop packaged executable before npm fallback", () => {
+    const desktopExecutable =
+      "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0.0_x64__test\\app\\resources\\codex.exe";
+    const entrypoint = path.join(
+      "C:\\Users\\Test\\AppData\\Roaming",
+      "npm",
+      "node_modules",
+      "@openai",
+      "codex",
+      "bin",
+      "codex.js"
+    );
+
+    expect(
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: path.dirname(desktopExecutable)
+        },
+        (candidate) => candidate === desktopExecutable || candidate === entrypoint
+      )
+    ).toEqual({
+      command: process.execPath,
+      prefixArgs: [entrypoint]
+    });
+  });
+
+  it("reports Codex CLI diagnostics when no Windows candidate exists", () => {
+    expect(() =>
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: "C:\\tools"
+        },
+        () => false
+      )
+    ).toThrowError(/"codexCliAvailable": false/);
+    expect(() =>
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: "C:\\tools"
+        },
+        () => false
+      )
+    ).toThrowError(/C:\\\\tools\\\\codex\.exe/);
+    expect(() =>
+      resolveCliInvocation(
+        "codex",
+        "win32",
+        {
+          APPDATA: "C:\\Users\\Test\\AppData\\Roaming",
+          PATH: "C:\\tools"
+        },
+        () => false
+      )
+    ).toThrowError(/@openai/);
+
     expect(resolveCliInvocation("codex", "linux", {})).toEqual({
       command: "codex",
       prefixArgs: []
@@ -161,7 +252,14 @@ describe("command helpers", () => {
       "read-only",
       "--ask-for-approval",
       "never",
+      "--disable",
+      "plugins",
+      "--disable",
+      "apps",
+      "--disable",
+      "multi_agent",
       "exec",
+      "--ephemeral",
       "--skip-git-repo-check",
       "Review only"
     ]);
@@ -171,6 +269,21 @@ describe("command helpers", () => {
     const result = await runCommand(process.execPath, ["--version"], { timeoutMs: 5000 });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/^v/);
+  });
+
+  it("closes child stdin so commands waiting for EOF can finish", async () => {
+    const result = await runCommand(
+      process.execPath,
+      [
+        "-e",
+        "process.stdin.resume(); process.stdin.on('end', () => console.log('EOF'));"
+      ],
+      { timeoutMs: 5000 }
+    );
+
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("EOF");
   });
 
   it("captures failed command output", async () => {

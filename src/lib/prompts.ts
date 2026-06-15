@@ -23,10 +23,14 @@ export type VerificationPromptInput = {
   commandOutput?: string;
 };
 
+const NO_RECURSION_INSTRUCTION =
+  "Do not call MCP tools, subagents, or another development workflow. Complete this request directly.";
+
 export function buildPlanPrompt(input: PlanPromptInput): string {
   return [
     "Create a concrete implementation plan for this repository.",
     "Use Superpowers-style discipline: goal, context, constraints, done-when, TDD, verification, and small tasks.",
+    NO_RECURSION_INSTRUCTION,
     "",
     `Goal: ${input.goal}`,
     `Constraints: ${input.constraints ?? "No extra constraints provided."}`,
@@ -43,6 +47,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   return [
     "Review the current changes. Findings first, ordered by severity.",
     "Prioritize bugs, regressions, security issues, broken tests, and missing verification.",
+    NO_RECURSION_INSTRUCTION,
     `Focus: ${input.focus ?? "correctness, maintainability, and tests"}`,
     "",
     "Repository context:",
@@ -57,6 +62,7 @@ export function buildDebugPrompt(input: DebugPromptInput): string {
   return [
     "Use systematic debugging. Do not guess. Separate evidence from hypotheses.",
     "Identify likely root causes, what evidence supports each one, and the smallest next diagnostic step.",
+    NO_RECURSION_INSTRUCTION,
     "",
     `Symptom: ${input.symptom}`,
     "",
@@ -72,6 +78,7 @@ export function buildVerificationPrompt(input: VerificationPromptInput): string 
   return [
     "Assess whether the requested work can be considered complete.",
     "Report verification evidence, commands run, pass/fail status, and residual risk.",
+    NO_RECURSION_INSTRUCTION,
     "",
     `Expected behavior: ${input.expectedBehavior}`,
     "",

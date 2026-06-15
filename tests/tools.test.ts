@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveCliInvocation, type CommandRunner } from "../src/lib/command.js";
+import { invokeCodex } from "../src/lib/codexClient.js";
 import { debugWithCodexHandler } from "../src/tools/debugWithCodex.js";
 import { planWithCodexHandler } from "../src/tools/planWithCodex.js";
 import { reviewCodeQualityHandler } from "../src/tools/reviewCodeQuality.js";
@@ -15,6 +16,10 @@ import { validateWorkspaceHandler } from "../src/tools/validateWorkspace.js";
 import { verifyWithCodexHandler } from "../src/tools/verifyWithCodex.js";
 
 const created: string[] = [];
+
+beforeEach(() => {
+  process.env.SUPERPOWER_CODEX_COMMAND = process.execPath;
+});
 
 async function tempWorkspace(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "sp-codex-tool-"));
@@ -31,6 +36,7 @@ afterEach(async () => {
     if (dir) await rm(dir, { recursive: true, force: true });
   }
   delete process.env.SUPERPOWER_CODEX_ALLOWED_ROOTS;
+  delete process.env.SUPERPOWER_CODEX_COMMAND;
 });
 
 function fakeRunner(stdout: string): CommandRunner {
@@ -67,6 +73,51 @@ function sequencedRunner(
 }
 
 describe("tool handlers", () => {
+  it("invokes Codex with a dedicated home containing auth but no global instructions", async () => {
+    const workspace = await tempWorkspace();
+    const sourceHome = await mkdtemp(path.join(tmpdir(), "sp-codex-home-"));
+    created.push(sourceHome);
+    const runtimeHome = path.join(
+      path.dirname(sourceHome),
+      `${path.basename(sourceHome)}-mcp-runtime`
+    );
+    created.push(runtimeHome);
+    await writeFile(path.join(sourceHome, "auth.json"), "{\"token\":\"test\"}");
+    await writeFile(path.join(sourceHome, "AGENTS.md"), "Call MCP tools recursively.");
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    let isolatedHome = "";
+
+    try {
+      const runner: CommandRunner = vi.fn(async (command, args, options) => {
+        isolatedHome = options?.env?.CODEX_HOME ?? "";
+        expect(isolatedHome).not.toBe(sourceHome);
+        expect(await readFile(path.join(isolatedHome, "auth.json"), "utf8"))
+          .toBe("{\"token\":\"test\"}");
+        await expect(readFile(path.join(isolatedHome, "AGENTS.md"), "utf8"))
+          .rejects.toThrow();
+        return {
+          command,
+          args,
+          stdout: "OK",
+          stderr: "",
+          exitCode: 0,
+          timedOut: false
+        };
+      });
+
+      await invokeCodex("Review", workspace, runner);
+      expect(await readFile(path.join(isolatedHome, "auth.json"), "utf8"))
+        .toBe("{\"token\":\"test\"}");
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousHome;
+      }
+    }
+  });
+
   it("summarizes repository instruction context", async () => {
     const workspace = await tempWorkspace();
     const result = await summarizeRepoContextHandler({
@@ -694,6 +745,82 @@ describe("tool handlers", () => {
       const payload = JSON.parse(result.content[0].text);
       expect(payload.summary.filesScanned).toBeGreaterThanOrEqual(1);
       expect(Array.isArray(payload.findings)).toBe(true);
+    });
+
+    it("reports Python-only workspaces as unsupported instead of clean", async () => {
+      const workspace = await tempWorkspace();
+      await writeFile(path.join(workspace, "pyproject.toml"), "[project]\nname = \"example\"");
+      await writeFile(path.join(workspace, "app.py"), "print('hello')\n");
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace
+      });
+
+      expect(result.isError).toBeUndefined();
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.summary.filesScanned).toBe(0);
+      expect(payload.unsupportedLanguage).toBe("python");
+      expect(payload.findings).toEqual([]);
+    });
+
+    it("reports explicitly selected Python files as unsupported", async () => {
+      const workspace = await tempWorkspace();
+      await writeFile(path.join(workspace, "app.py"), "print('hello')\n");
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace,
+        files: ["app.py"]
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.summary.filesScanned).toBe(0);
+      expect(payload.unsupportedLanguage).toBe("python");
+      expect(payload.findings).toEqual([]);
+    });
+
+    it("detects Python source in arbitrary nested directories", async () => {
+      const workspace = await tempWorkspace();
+      const packageDir = path.join(workspace, "package", "nested");
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(path.join(packageDir, "module.py"), "VALUE = 1\n");
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.summary.filesScanned).toBe(0);
+      expect(payload.unsupportedLanguage).toBe("python");
+    });
+
+    it("ignores Python files inside virtual environments", async () => {
+      const workspace = await tempWorkspace();
+      const packageDir = path.join(workspace, "venv", "Lib", "site-packages");
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(path.join(packageDir, "dependency.py"), "VALUE = 1\n");
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.unsupportedLanguage).toBeUndefined();
+    });
+
+    it("scans selected TypeScript and reports selected Python as unsupported files", async () => {
+      const workspace = await tempWorkspace();
+      await writeFile(path.join(workspace, "app.ts"), "export const value = 1;\n");
+      await writeFile(path.join(workspace, "app.py"), "VALUE = 1\n");
+
+      const result = await reviewCodeQualityHandler({
+        workspacePath: workspace,
+        files: ["app.ts", "app.py"]
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.summary.filesScanned).toBe(1);
+      expect(payload.unsupportedLanguage).toBeUndefined();
+      expect(payload.unsupportedFiles).toEqual(["app.py"]);
     });
 
     it("rejects workspace outside allowed roots", async () => {

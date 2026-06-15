@@ -28,6 +28,21 @@ export type CliInvocation = {
   prefixArgs: string[];
 };
 
+function windowsPathDirectories(env: NodeJS.ProcessEnv): string[] {
+  return (env.PATH?.split(path.win32.delimiter) ?? [])
+    .map((dir) => dir.trim())
+    .map((dir) =>
+      dir.startsWith('"') && dir.endsWith('"') ? dir.slice(1, -1) : dir
+    )
+    .filter(Boolean);
+}
+
+function isCodexDesktopPackagedExecutable(candidate: string): boolean {
+  const normalized = candidate.toLowerCase();
+  return normalized.includes("\\windowsapps\\openai.codex_") &&
+    normalized.endsWith("\\app\\resources\\codex.exe");
+}
+
 export function resolveCliInvocation(
   name: "codex" | "gemini" | "antigravity",
   platform: NodeJS.Platform = process.platform,
@@ -39,15 +54,8 @@ export function resolveCliInvocation(
     if (override) return { command: override, prefixArgs: [] };
     if (platform !== "win32") return { command: "agy", prefixArgs: [] };
 
-    const pathDirs = env.PATH?.split(path.win32.delimiter) ?? [];
-    for (const dir of pathDirs) {
-      const trimmedDir = dir.trim();
-      const normalizedDir =
-        trimmedDir.startsWith('"') && trimmedDir.endsWith('"')
-          ? trimmedDir.slice(1, -1)
-          : trimmedDir;
-      if (!normalizedDir) continue;
-      const candidate = path.win32.join(normalizedDir, "agy.exe");
+    for (const dir of windowsPathDirectories(env)) {
+      const candidate = path.win32.join(dir, "agy.exe");
       if (fileExists(candidate)) {
         return { command: candidate, prefixArgs: [] };
       }
@@ -72,6 +80,41 @@ export function resolveCliInvocation(
   if (override) return { command: override, prefixArgs: [] };
   if (platform !== "win32") return { command: name, prefixArgs: [] };
 
+  if (name === "codex") {
+    const searchedPaths: string[] = [];
+    for (const dir of windowsPathDirectories(env)) {
+      const candidate = path.win32.join(dir, "codex.exe");
+      searchedPaths.push(candidate);
+      if (fileExists(candidate) && !isCodexDesktopPackagedExecutable(candidate)) {
+        return { command: candidate, prefixArgs: [] };
+      }
+    }
+
+    const npmPrefix =
+      env.npm_config_prefix?.trim() ||
+      (env.APPDATA ? path.join(env.APPDATA, "npm") : "");
+    if (npmPrefix) {
+      const entrypoint = path.join(
+        npmPrefix,
+        "node_modules",
+        "@openai",
+        "codex",
+        "bin",
+        "codex.js"
+      );
+      searchedPaths.push(entrypoint);
+      if (fileExists(entrypoint)) {
+        return { command: process.execPath, prefixArgs: [entrypoint] };
+      }
+    }
+
+    throw new Error(JSON.stringify({
+      codexCliAvailable: false,
+      searchedPaths,
+      hint: `Install Codex CLI or set ${overrideName} to an executable path.`
+    }, null, 2));
+  }
+
   const npmPrefix =
     env.npm_config_prefix?.trim() ||
     (env.APPDATA ? path.join(env.APPDATA, "npm") : "");
@@ -80,24 +123,14 @@ export function resolveCliInvocation(
       `Cannot locate the Windows npm prefix for ${name}. Set ${overrideName} to an executable path.`
     );
   }
-  const entrypoint =
-    name === "codex"
-      ? path.join(
-          npmPrefix,
-          "node_modules",
-          "@openai",
-          "codex",
-          "bin",
-          "codex.js"
-        )
-      : path.join(
-          npmPrefix,
-          "node_modules",
-          "@google",
-          "gemini-cli",
-          "bundle",
-          "gemini.js"
-        );
+  const entrypoint = path.join(
+    npmPrefix,
+    "node_modules",
+    "@google",
+    "gemini-cli",
+    "bundle",
+    "gemini.js"
+  );
   return { command: process.execPath, prefixArgs: [entrypoint] };
 }
 
@@ -107,7 +140,14 @@ export function buildCodexExecArgs(prompt: string): string[] {
     "read-only",
     "--ask-for-approval",
     "never",
+    "--disable",
+    "plugins",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
     "exec",
+    "--ephemeral",
     "--skip-git-repo-check",
     prompt
   ];
@@ -124,7 +164,7 @@ export async function runCommand(
   options: CommandOptions = {}
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       command,
       args,
       {
@@ -146,5 +186,6 @@ export async function runCommand(
         });
       }
     );
+    child.stdin?.end();
   });
 }

@@ -10,7 +10,7 @@ diagnostics.
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 20.19 or newer, or Node.js 22.12 or newer
 - Codex CLI installed and authenticated
 - Antigravity CLI (`agy`) installed and authenticated
 - Git
@@ -42,6 +42,18 @@ SUPERPOWER_CODEX_ALLOWED_ROOTS = "C:\\path\\to\\projects"
 ```
 
 Restart Codex Desktop after changing MCP configuration.
+
+On Windows, the server resolves Codex in this order:
+
+1. `SUPERPOWER_CODEX_COMMAND`
+2. `codex.exe` found on `PATH`
+3. An existing global npm `@openai/codex` entrypoint
+
+The packaged Codex Desktop binary under `WindowsApps\OpenAI.Codex_*` is skipped
+because Windows can reject external child-process launches with `EPERM`.
+
+If no candidate exists, Codex-backed tools return structured diagnostics with
+`codexCliAvailable: false` and the paths that were searched.
 
 ## Antigravity configuration
 
@@ -102,6 +114,16 @@ $env:SUPERPOWER_ANTIGRAVITY_COMMAND = "C:\custom\path\agy.exe"
 8. Call `verify_with_codex` before declaring completion.
 
 For an automated version of this sequence, use `run_development_workflow`.
+
+`review_code_quality` currently supports TypeScript. A Python-only workspace
+returns `unsupportedLanguage: "python"` instead of presenting zero scanned
+files as a clean review. Recursive Python detection ignores virtual environment
+and build directories (such as `venv`, `.venv`, `__pycache__`, `.tox`, `build`,
+`dist`, `node_modules`, and `.git`).
+
+For explicit mixed selections (e.g. `app.ts` and `app.py`), the tool scans the
+TypeScript files and returns `unsupportedFiles: ["app.py"]` while omitting
+`unsupportedLanguage`.
 
 ## Coding task example
 
@@ -169,7 +191,22 @@ npm.cmd test
 npm.cmd run build
 ```
 
-The verified baseline is 126 passing tests across 9 test files.
+The verified baseline is 136 passing tests across 9 test files.
+
+## Updating an existing Windows installation
+
+Download `superpower-codex-mcp-v0.1.1-windows.zip` from the GitHub release,
+extract it, and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\update-installed.ps1 `
+  -InstallPath "C:\path\to\superpower-codex-mcp"
+```
+
+The updater validates the installation, creates a backup under
+`.update-backups`, installs production dependencies, and verifies MCP tool
+discovery. Restart Codex Desktop after the update.
 
 ## License
 

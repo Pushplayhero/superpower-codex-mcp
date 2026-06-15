@@ -18,6 +18,7 @@ describe("prompt builders", () => {
     expect(prompt).toContain("Constraints: TypeScript only");
     expect(prompt).toContain("Done when: Tests pass");
     expect(prompt).toContain("implementation plan");
+    expect(prompt).toContain("Do not call MCP tools");
   });
 
   it("builds review prompt that asks findings first", () => {
@@ -29,6 +30,7 @@ describe("prompt builders", () => {
     expect(prompt).toContain("Findings first");
     expect(prompt).toContain("correctness");
     expect(prompt).toContain("diff --git");
+    expect(prompt).toContain("Do not call MCP tools");
   });
 
   it("builds debug prompt that asks for evidence", () => {
@@ -40,6 +42,7 @@ describe("prompt builders", () => {
     expect(prompt).toContain("Do not guess");
     expect(prompt).toContain("test fails");
     expect(prompt).toContain("expected true got false");
+    expect(prompt).toContain("Do not call MCP tools");
   });
 
   it("builds verification prompt with commands", () => {
@@ -51,5 +54,6 @@ describe("prompt builders", () => {
     expect(prompt).toContain("MCP starts");
     expect(prompt).toContain("npm test");
     expect(prompt).toContain("PASS");
+    expect(prompt).toContain("Do not call MCP tools");
   });
 });

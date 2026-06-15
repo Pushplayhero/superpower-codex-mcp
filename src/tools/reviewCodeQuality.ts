@@ -254,7 +254,74 @@ export async function reviewCodeQualityHandler(
     return toolErrorResult(error, "Workspace rejected");
   }
 
-  const { files, errors: resolveErrors } = resolveFiles(workspace, input.files);
+  const {
+    files: resolvedFiles,
+    errors: resolveErrors
+  } = resolveFiles(workspace, input.files);
+
+  const tsFiles = resolvedFiles.filter((file) => /\.tsx?$/i.test(file));
+  const pyFiles = resolvedFiles.filter((file) => file.toLowerCase().endsWith(".py"));
+
+  let unsupportedLanguage: string | undefined = undefined;
+  let unsupportedFiles: string[] | undefined = undefined;
+  let files: string[];
+
+  if (input.files && input.files.length > 0) {
+    if (pyFiles.length > 0 && tsFiles.length > 0) {
+      unsupportedLanguage = undefined;
+      unsupportedFiles = pyFiles;
+      files = tsFiles;
+    } else if (pyFiles.length > 0) {
+      unsupportedLanguage = "python";
+      unsupportedFiles = undefined;
+      files = [];
+    } else {
+      unsupportedLanguage = undefined;
+      unsupportedFiles = undefined;
+      files = resolvedFiles;
+    }
+  } else {
+    if (resolvedFiles.length === 0) {
+      const pythonMarkers = [
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "Pipfile"
+      ];
+      const hasPythonMarker = pythonMarkers.some((marker) =>
+        existsSync(join(workspace, marker))
+      );
+
+      const EXCLUDED_DIRS = new Set([
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".tox",
+        "build",
+        "dist",
+        "node_modules",
+        ".git"
+      ]);
+
+      const hasPythonSource = globSync(
+        `${workspace.replace(/\\/g, "/")}/**/*.py`,
+        {
+          exclude: (p) => {
+            const absoluteP = resolve(workspace, p);
+            const rel = relative(workspace, absoluteP);
+            const segments = rel.split(/[\\/]/);
+            return segments.some((seg) => EXCLUDED_DIRS.has(seg));
+          }
+        }
+      ).length > 0;
+
+      if (hasPythonMarker || hasPythonSource) {
+        unsupportedLanguage = "python";
+      }
+    }
+    files = resolvedFiles;
+  }
+
   const activeChecks = input.checks && input.checks.length > 0
     ? input.checks
     : Object.keys(ALL_CHECKS);
@@ -300,6 +367,8 @@ export async function reviewCodeQualityHandler(
       filesScanned: files.length,
       checksRun: activeChecks.filter((c) => ALL_CHECKS[c]).length
     },
+    unsupportedLanguage,
+    unsupportedFiles,
     findings: allFindings.slice(0, maxFindings),
     errors: errors.length > 0 ? errors : undefined
   }, null, 2));
