@@ -15,6 +15,7 @@ export type CommandOptions = {
   cwd?: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  stdin?: string;
 };
 
 export type CommandRunner = (
@@ -153,6 +154,40 @@ export function buildCodexExecArgs(prompt: string): string[] {
   ];
 }
 
+export function resolveExecutableInvocation(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  fileExists: (candidate: string) => boolean = existsSync
+): { command: string; args: string[] } {
+  if (
+    platform === "win32" &&
+    !command.includes("/") &&
+    !command.includes("\\") &&
+    command.toLowerCase() === "npm"
+  ) {
+    const candidates = [
+      env.npm_execpath?.trim(),
+      path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+      env.APPDATA
+        ? path.join(env.APPDATA, "npm", "node_modules", "npm", "bin", "npm-cli.js")
+        : undefined
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    const npmCli = candidates.find(fileExists);
+    if (!npmCli) {
+      throw new Error(
+        "Cannot locate npm-cli.js for shell-free execution on Windows."
+      );
+    }
+    return {
+      command: process.execPath,
+      args: [npmCli, ...args]
+    };
+  }
+  return { command, args };
+}
+
 export function commandForDisplay(command: string, args: string[]): string {
   const quoted = args.map((arg) => (/^[A-Za-z0-9_./:=\\-]+$/.test(arg) ? arg : JSON.stringify(arg)));
   return [command, ...quoted].join(" ");
@@ -164,9 +199,23 @@ export async function runCommand(
   options: CommandOptions = {}
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
+    let invocation: { command: string; args: string[] };
+    try {
+      invocation = resolveExecutableInvocation(command, args);
+    } catch (error) {
+      resolve({
+        command,
+        args,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: 1,
+        timedOut: false
+      });
+      return;
+    }
     const child = execFile(
-      command,
-      args,
+      invocation.command,
+      invocation.args,
       {
         cwd: options.cwd,
         env: options.env,
@@ -177,8 +226,8 @@ export async function runCommand(
       (error, stdout, stderr) => {
         const err = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
         resolve({
-          command,
-          args,
+          command: invocation.command,
+          args: invocation.args,
           stdout: stdout.toString(),
           stderr: stderr.toString(),
           exitCode: typeof err?.code === "number" ? err.code : err ? 1 : 0,
@@ -186,6 +235,6 @@ export async function runCommand(
         });
       }
     );
-    child.stdin?.end();
+    child.stdin?.end(options.stdin);
   });
 }

@@ -28,6 +28,9 @@ describe("prompt builders", () => {
       diff: "diff --git"
     });
     expect(prompt).toContain("Findings first");
+    expect(prompt).toContain('"status": "clean" | "findings"');
+    expect(prompt).toContain("Return JSON only");
+    expect(prompt).toContain("Do not run commands");
     expect(prompt).toContain("correctness");
     expect(prompt).toContain("diff --git");
     expect(prompt).toContain("Do not call MCP tools");
@@ -55,5 +58,6 @@ describe("prompt builders", () => {
     expect(prompt).toContain("npm test");
     expect(prompt).toContain("PASS");
     expect(prompt).toContain("Do not call MCP tools");
+    expect(prompt).toContain("Do not run commands");
   });
 });

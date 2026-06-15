@@ -79,7 +79,8 @@ export function createServer(): McpServer {
 
   server.tool(
     "run_development_workflow",
-    "Orchestrate the full development workflow: plan → implement → review → fix → verify. Runs Codex for planning/review/verify and Antigravity for cheap implementation iterations.",
+    "Orchestrate plan, implement, review, fix, and verify stages. " +
+      "Codex plans, reviews, and verifies; Antigravity executes coding and fix iterations.",
     runDevelopmentWorkflowSchema,
     (input) => runDevelopmentWorkflowHandler(input)
   );
@@ -93,14 +94,16 @@ export function createServer(): McpServer {
 
   server.tool(
     "run_gemini_coding_task",
-    `Invoke Gemini CLI for coding. ${COMMON_DESCRIPTION}`,
+    "Deprecated compatibility alias for run_antigravity_coding_task. " +
+      `Invokes Antigravity CLI for coding. ${COMMON_DESCRIPTION}`,
     runCodingTaskSchema,
     (input) => runCodingTaskHandler(input)
   );
 
   server.tool(
     "run_antigravity_coding_task",
-    `Invoke Antigravity CLI for coding. ${COMMON_DESCRIPTION}`,
+    "Canonical coding execution tool. Invokes Antigravity CLI while Codex retains " +
+      `planning, review, debugging, and verification responsibilities. ${COMMON_DESCRIPTION}`,
     runCodingTaskSchema,
     (input) => runCodingTaskHandler(input)
   );

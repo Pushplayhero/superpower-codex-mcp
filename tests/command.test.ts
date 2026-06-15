@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   buildCodexExecArgs,
   commandForDisplay,
+  resolveExecutableInvocation,
   resolveCliInvocation,
   runCommand
 } from "../src/lib/command.js";
@@ -246,7 +247,7 @@ describe("command helpers", () => {
     });
   });
 
-  it("places Codex global flags before the exec subcommand", () => {
+  it("builds Codex 0.139 compatible non-interactive exec arguments", () => {
     expect(buildCodexExecArgs("Review only")).toEqual([
       "--sandbox",
       "read-only",
@@ -265,25 +266,62 @@ describe("command helpers", () => {
     ]);
   });
 
+  it("runs bare npm through its JavaScript CLI on Windows", () => {
+    expect(
+      resolveExecutableInvocation(
+        "npm",
+        ["test"],
+        "win32",
+        { npm_execpath: "C:\\tools\\npm-cli.js" },
+        (candidate) => candidate === "C:\\tools\\npm-cli.js"
+      )
+    ).toEqual({
+      command: process.execPath,
+      args: ["C:\\tools\\npm-cli.js", "test"]
+    });
+    expect(
+      resolveExecutableInvocation("npm", ["test"], "linux", {})
+    ).toEqual({
+      command: "npm",
+      args: ["test"]
+    });
+  });
+
   it("runs a successful command", async () => {
     const result = await runCommand(process.execPath, ["--version"], { timeoutMs: 5000 });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/^v/);
   });
 
-  it("closes child stdin so commands waiting for EOF can finish", async () => {
+  it("closes child stdin when no input is provided", async () => {
+    const script = [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => process.stdout.write('stdin closed'));"
+    ].join("");
     const result = await runCommand(
       process.execPath,
-      [
-        "-e",
-        "process.stdin.resume(); process.stdin.on('end', () => console.log('EOF'));"
-      ],
-      { timeoutMs: 5000 }
+      ["-e", script],
+      { timeoutMs: 1000 }
     );
 
     expect(result.timedOut).toBe(false);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("EOF");
+    expect(result.stdout).toBe("stdin closed");
+  });
+
+  it("passes explicit stdin input to the child process", async () => {
+    const script = [
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => input += chunk);",
+      "process.stdin.on('end', () => process.stdout.write(input));"
+    ].join("");
+    const result = await runCommand(
+      process.execPath,
+      ["-e", script],
+      { timeoutMs: 1000, stdin: "review evidence" }
+    );
+
+    expect(result.stdout).toBe("review evidence");
   });
 
   it("captures failed command output", async () => {

@@ -12,6 +12,7 @@ import { runCodingTaskHandler } from "./runCodingTask.js";
 import { reviewWithCodexHandler } from "./reviewWithCodex.js";
 import { verifyWithCodexHandler } from "./verifyWithCodex.js";
 import { planOutputPath } from "../lib/workspace.js";
+import { parseReviewResult } from "../lib/reviewResult.js";
 
 export const runDevelopmentWorkflowSchema = {
   workspacePath: z.string().describe("Repository or workspace path."),
@@ -22,6 +23,10 @@ export const runDevelopmentWorkflowSchema = {
   skipPlan: z.boolean().default(false).describe("Skip planning phase if a plan already exists."),
   skipReview: z.boolean().default(false).describe("Skip code review phase."),
   skipVerify: z.boolean().default(false).describe("Skip final verification phase."),
+  verificationCommands: z.array(z.string())
+    .min(1)
+    .default(["npm test", "npm run typecheck"])
+    .describe("Commands used for final verification."),
   maxIterations: z.number().int().min(1).max(10).default(3).describe("Max code-review-fix iterations.")
 };
 
@@ -34,25 +39,9 @@ export type RunDevelopmentWorkflowInput = {
   skipPlan?: boolean;
   skipReview?: boolean;
   skipVerify?: boolean;
+  verificationCommands?: string[];
   maxIterations?: number;
 };
-
-function hasFindings(reviewText: string): boolean {
-  const lines = reviewText.split("\n");
-  let inFindings = false;
-  let findingCount = 0;
-  for (const line of lines) {
-    if (/^#{1,3}\s*findings/i.test(line)) {
-      inFindings = true;
-      continue;
-    }
-    if (inFindings) {
-      if (/^#{1,3}/.test(line) && !/findings/i.test(line)) break;
-      if (/^-\s*\*\*/.test(line)) findingCount++;
-    }
-  }
-  return findingCount > 0;
-}
 
 type StageResult = {
   stage: string;
@@ -65,6 +54,10 @@ export async function runDevelopmentWorkflowHandler(
   input: RunDevelopmentWorkflowInput,
   runner: CommandRunner = runCommand
 ): Promise<McpTextResult> {
+  if (input.verificationCommands && input.verificationCommands.length === 0) {
+    return errorResult("verificationCommands cannot be empty");
+  }
+
   const stages: StageResult[] = [];
   let planText = "";
 
@@ -157,14 +150,24 @@ export async function runDevelopmentWorkflowHandler(
         runner
       );
       reviewText = reviewResult.content[0].text;
-      const findings = hasFindings(reviewText);
-
-      // Check for Codex execution failure
-      const reviewFailed = reviewResult.isError === true;
+      let findingCount = 0;
+      let reviewFailed = reviewResult.isError === true;
+      if (!reviewFailed) {
+        try {
+          findingCount = parseReviewResult(reviewText).findings.length;
+        } catch {
+          reviewFailed = true;
+        }
+      }
+      const findings = findingCount > 0;
       stages.push({
         stage: i === 0 ? "review" : `review_round_${i + 1}`,
         ok: !reviewFailed && !findings,
-        summary: reviewFailed ? "Codex review execution failed." : findings ? `${extractFindingCount(reviewText)} issues found.` : "No issues found.",
+        summary: reviewFailed
+          ? "Codex review execution failed."
+          : findings
+            ? `${findingCount} issues found.`
+            : "No issues found.",
         details: reviewText
       });
 
@@ -220,7 +223,7 @@ export async function runDevelopmentWorkflowHandler(
       {
         workspacePath: input.workspacePath,
         expectedBehavior: input.goal,
-        verificationCommands: ["npm test", "npm run typecheck"],
+        verificationCommands: input.verificationCommands ?? ["npm test", "npm run typecheck"],
         allowCommandExecution: true
       },
       runner
@@ -244,13 +247,6 @@ export async function runDevelopmentWorkflowHandler(
     workflow: workflowOk ? "completed" : "completed_with_issues",
     stages
   }, null, 2));
-}
-
-function extractFindingCount(text: string): string {
-  const match = text.match(/(\d+)\s+issue/i);
-  if (match) return match[0];
-  const count = (text.match(/-\s*\*\*/g) || []).length;
-  return `${count} potential`;
 }
 
 function parseImplementOk(text: string): boolean {

@@ -10,6 +10,7 @@ import {
   type McpTextResult
 } from "../lib/mcp.js";
 import { buildReviewPrompt } from "../lib/prompts.js";
+import { parseReviewResult } from "../lib/reviewResult.js";
 import {
   collectInstructionFiles,
   requireWorkspace
@@ -55,7 +56,12 @@ export async function reviewWithCodexHandler(
         `Codex review failed.\n\nstderr:\n${result.stderr}\n\nstdout:\n${result.stdout}`
       );
     }
-    return textResult(result.stdout);
+    try {
+      return textResult(JSON.stringify(parseReviewResult(result.stdout), null, 2));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResult(`Codex returned an invalid structured review: ${message}`);
+    }
   } catch (error: unknown) {
     return toolErrorResult(error, "Failed to review with Codex");
   }

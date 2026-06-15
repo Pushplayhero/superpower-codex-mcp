@@ -4,9 +4,9 @@ A TypeScript MCP server that coordinates Codex and Antigravity CLI with a
 Superpowers-style software development workflow.
 
 Codex handles planning, review, debugging, and verification. Antigravity CLI
-handles coding execution. The server adds workspace authorization, Git-based
-change verification, acceptance criteria, compact task reports, and persisted
-diagnostics.
+is the canonical coding executor. The server adds workspace authorization,
+Git-based change verification, acceptance criteria, compact task reports, and
+persisted diagnostics.
 
 ## Requirements
 
@@ -98,8 +98,8 @@ $env:SUPERPOWER_ANTIGRAVITY_COMMAND = "C:\custom\path\agy.exe"
 | `debug_with_codex` | Ask Codex to investigate failures systematically. |
 | `verify_with_codex` | Run explicitly allowed verification commands and ask Codex to assess the evidence. |
 | `review_code_quality` | Run a local TypeScript structural scan without consuming model tokens. |
-| `run_antigravity_coding_task` | Execute a coding task through Antigravity CLI. |
-| `run_gemini_coding_task` | Deprecated compatibility name; it now uses the same Antigravity-only handler. |
+| `run_antigravity_coding_task` | Canonical coding execution tool backed by Antigravity CLI. |
+| `run_gemini_coding_task` | Deprecated compatibility alias for `run_antigravity_coding_task`; it does not invoke Gemini CLI directly. |
 | `run_development_workflow` | Coordinate plan, implement, review, fix, and verify stages. |
 
 ## Recommended workflow
@@ -114,6 +114,13 @@ $env:SUPERPOWER_ANTIGRAVITY_COMMAND = "C:\custom\path\agy.exe"
 8. Call `verify_with_codex` before declaring completion.
 
 For an automated version of this sequence, use `run_development_workflow`.
+Its `verificationCommands` input defaults to `["npm test", "npm run typecheck"]`
+and can be replaced for pnpm, Bun, Python, Go, monorepo, or other project
+toolchains.
+
+`review_with_codex` returns validated structured JSON with a `status`,
+`summary`, and severity-ordered `findings` array. Malformed model output is
+reported as an error instead of being interpreted as a clean review.
 
 `review_code_quality` currently supports TypeScript. A Python-only workspace
 returns `unsupportedLanguage: "python"` instead of presenting zero scanned

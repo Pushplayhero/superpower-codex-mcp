@@ -168,12 +168,36 @@ describe("tool handlers", () => {
 
   it("calls codex exec for review", async () => {
     const workspace = await tempWorkspace();
-    const runner = fakeRunner("No findings.");
+    const runner = fakeRunner(JSON.stringify({
+      status: "clean",
+      summary: "No findings.",
+      findings: []
+    }));
     const result = await reviewWithCodexHandler(
       { workspacePath: workspace, reviewScope: "working-tree", focus: "correctness" },
       runner
     );
-    expect(result.content[0].text).toContain("No findings.");
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: "clean",
+      findings: []
+    });
+    expect(runner).toHaveBeenCalledWith(
+      resolveCliInvocation("codex").command,
+      expect.any(Array),
+      expect.objectContaining({ cwd: workspace, timeoutMs: 300_000 })
+    );
+  });
+
+  it("rejects malformed Codex review output", async () => {
+    const workspace = await tempWorkspace();
+    const result = await reviewWithCodexHandler(
+      { workspacePath: workspace, reviewScope: "working-tree" },
+      fakeRunner("No findings.")
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("structured review");
   });
 
   it("calls codex exec for debugging", async () => {
@@ -868,7 +892,17 @@ describe("tool handlers", () => {
         { stdout: "" },
         // review round 1: git diff 1 + codex exec 1 = 2 (has findings)
         { stdout: "" },
-        { stdout: "## Findings\n- **Issue 1:** test" },
+        { stdout: JSON.stringify({
+          status: "findings",
+          summary: "One issue found.",
+          findings: [
+            {
+              severity: "high",
+              title: "Issue 1",
+              body: "test"
+            }
+          ]
+        }) },
         // fix round: preflight 3 + antigravity 1 + postflight 3 = 7
         { stdout: ".git\n" },
         { stdout: "bbbb\n" },
@@ -879,7 +913,11 @@ describe("tool handlers", () => {
         { stdout: "" },
         // review round 2: git diff 1 + codex exec 1 = 2 (no findings)
         { stdout: "" },
-        { stdout: "No issues found." }
+        { stdout: JSON.stringify({
+          status: "clean",
+          summary: "No issues found.",
+          findings: []
+        }) }
       ]);
       const result = await runDevelopmentWorkflowHandler(
         {
@@ -948,6 +986,88 @@ describe("tool handlers", () => {
       expect(payload.stages[1].summary).toBe("Codex review execution failed.");
     });
 
+    it("passes custom verification commands to verification", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({
+          status: "committed",
+          summary: "done",
+          commitSha: "bbbb",
+          changedFiles: [],
+          acceptanceMatrix: []
+        }) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        { stdout: "lint passed" },
+        { stdout: "Verification passed." }
+      ]);
+
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Use custom verification",
+          skipPlan: true,
+          skipReview: true,
+          verificationCommands: ["npm run lint"]
+        },
+        runner
+      );
+
+      expect(JSON.parse(result.content[0].text).workflow).toBe("completed");
+      expect(runner).toHaveBeenCalledWith(
+        "npm",
+        ["run", "lint"],
+        expect.objectContaining({ cwd: workspace })
+      );
+    });
+
+    it("preserves the default verification commands", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({
+          status: "committed",
+          summary: "done",
+          commitSha: "bbbb",
+          changedFiles: [],
+          acceptanceMatrix: []
+        }) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        { stdout: "tests passed" },
+        { stdout: "types passed" },
+        { stdout: "Verification passed." }
+      ]);
+
+      await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Use default verification",
+          skipPlan: true,
+          skipReview: true
+        },
+        runner
+      );
+
+      expect(runner).toHaveBeenCalledWith(
+        "npm",
+        ["test"],
+        expect.objectContaining({ cwd: workspace })
+      );
+      expect(runner).toHaveBeenCalledWith(
+        "npm",
+        ["run", "typecheck"],
+        expect.objectContaining({ cwd: workspace })
+      );
+    });
+
     it("returns completed_with_issues when workspace is outside allowed roots", async () => {
       const allowed = await tempWorkspace();
       const outside = await mkdtemp(path.join(tmpdir(), "sp-devflow-outside-"));
@@ -972,6 +1092,37 @@ describe("tool handlers", () => {
       expect(payload.workflow).toBe("completed_with_issues");
       expect(payload.stages[0].stage).toBe("implement");
       expect(payload.stages[0].ok).toBe(false);
+    });
+
+    it("rejects an explicitly empty verificationCommands array", async () => {
+      const workspace = await tempWorkspace();
+      const runner = fakeRunner("must not run");
+
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Do not run",
+          skipPlan: true,
+          skipReview: true,
+          verificationCommands: []
+        },
+        runner
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("verificationCommands cannot be empty");
+    });
+
+    it("rejects an empty verificationCommands array via Zod schema", async () => {
+      const { z } = await import("zod");
+      const { runDevelopmentWorkflowSchema } = await import("../src/tools/runDevelopmentWorkflow.js");
+      const schema = z.object(runDevelopmentWorkflowSchema);
+      const parsed = schema.safeParse({
+        workspacePath: "/some/path",
+        goal: "Goal",
+        verificationCommands: []
+      });
+      expect(parsed.success).toBe(false);
     });
   });
 

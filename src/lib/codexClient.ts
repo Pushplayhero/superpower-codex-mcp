@@ -37,7 +37,7 @@ export async function invokeCodex(
   prompt: string,
   cwd: string,
   runner: CommandRunner = runCommand,
-  timeoutMs = 120_000
+  timeoutMs = 300_000
 ): Promise<CodexResult> {
   const { command, prefixArgs } = resolveCliInvocation("codex");
   const isolatedHome = await createIsolatedCodexHome();
