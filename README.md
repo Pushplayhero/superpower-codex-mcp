@@ -241,7 +241,7 @@ npm.cmd test
 npm.cmd run build
 ```
 
-The verified baseline is updated by the verification run below.
+The verified baseline is 151 passing tests across 11 test files.
 
 ## Updating an existing Windows installation
 
