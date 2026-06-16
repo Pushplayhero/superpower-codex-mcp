@@ -1101,6 +1101,86 @@ describe("tool handlers", () => {
       );
     });
 
+    it("keeps verification passed when commands pass even if assessment prose is scary", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({
+          status: "committed",
+          summary: "done",
+          commitSha: "bbbb",
+          changedFiles: [],
+          acceptanceMatrix: []
+        }) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        { stdout: "tests passed" },
+        { stdout: "# Findings\nNo command failed, but mention error handling." }
+      ]);
+
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Keep command evidence authoritative",
+          skipPlan: true,
+          skipReview: true,
+          verificationCommands: ["npm test"]
+        },
+        runner
+      );
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("completed");
+      expect(payload.stages.at(-1)).toMatchObject({
+        stage: "verify",
+        ok: true,
+        summary: "Verification passed."
+      });
+    });
+
+    it("keeps verification failed when commands fail even if assessment prose is positive", async () => {
+      const workspace = await tempWorkspace();
+      const runner = sequencedRunner([
+        { stdout: ".git\n" },
+        { stdout: "aaaa\n" },
+        { stdout: "" },
+        { stdout: JSON.stringify({ response: JSON.stringify({
+          status: "committed",
+          summary: "done",
+          commitSha: "bbbb",
+          changedFiles: [],
+          acceptanceMatrix: []
+        }) }) },
+        { stdout: "bbbb\n" },
+        { stdout: "" },
+        { stdout: "" },
+        { stdout: "tests failed", exitCode: 1 },
+        { stdout: "Everything passed from the assessment perspective." }
+      ]);
+
+      const result = await runDevelopmentWorkflowHandler(
+        {
+          workspacePath: workspace,
+          goal: "Keep command failures authoritative",
+          skipPlan: true,
+          skipReview: true,
+          verificationCommands: ["npm test"]
+        },
+        runner
+      );
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.workflow).toBe("completed_with_issues");
+      expect(payload.failedStage).toBe("verify");
+      expect(payload.stages.at(-1)).toMatchObject({
+        stage: "verify",
+        ok: false
+      });
+    });
+
     it("preserves the default verification commands", async () => {
       const workspace = await tempWorkspace();
       const runner = sequencedRunner([
@@ -1222,6 +1302,8 @@ describe("tool handlers", () => {
       expect(payload.stages[0].ok).toBe(false);
       expect(payload.failedStage).toBe("plan");
       expect(payload.nextAction).toBe("Verify the goals and constraints or retry planning.");
+      expect(payload.failureSummary).toBe("Codex planning failed.");
+      expect(payload.failureDetails).toContain("Plan failed");
     });
 
     it("adds failedStage and nextAction diagnostics on verification failure (later failure path)", async () => {
@@ -1243,7 +1325,8 @@ describe("tool handlers", () => {
         { stdout: "" },
         { stdout: "" },
         // verify command exit code non-zero
-        { stdout: "Exit code: 1\nCommand result: FAILED\n# Findings\n- issue", exitCode: 1 }
+        { stdout: "tests failed", exitCode: 1 },
+        { stdout: "Codex assessment text" }
       ]);
       const result = await runDevelopmentWorkflowHandler(
         {
@@ -1251,7 +1334,8 @@ describe("tool handlers", () => {
           goal: "Implement goal",
           skipPlan: true,
           skipReview: true,
-          skipVerify: false
+          skipVerify: false,
+          verificationCommands: ["npm test"]
         },
         runner
       );
@@ -1266,6 +1350,8 @@ describe("tool handlers", () => {
       expect(payload.nextAction).toBe(
         "Fix the failing tests or type errors reported in verification details."
       );
+      expect(payload.failureSummary).toBe("Verification execution error.");
+      expect(payload.failureDetails).toContain("Command result: FAILED");
     });
   });
 

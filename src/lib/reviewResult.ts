@@ -38,16 +38,69 @@ const severityRank: Record<ReviewResult["findings"][number]["severity"], number>
   low: 3
 };
 
-function stripJsonFence(text: string): string {
-  const match = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return match ? match[1] : text.trim();
+function parseJsonObject(candidate: string): unknown | undefined {
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasReviewShape(candidate: unknown): boolean {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return false;
+  }
+  if (!("status" in candidate)) return false;
+
+  const status = candidate.status;
+  return (status === "clean" || status === "findings") &&
+    ("summary" in candidate || "findings" in candidate);
+}
+
+function findFirstReviewJson(text: string): unknown | undefined {
+  const exact = parseJsonObject(text.trim());
+  if (hasReviewShape(exact)) return exact;
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+    for (let j = i; j < text.length; j++) {
+      const char = text[j];
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (char === "\\") {
+        escapeNext = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+
+      if (char === "{") {
+        depth++;
+      } else if (char === "}") {
+        depth--;
+        if (depth === 0) {
+          const parsed = parseJsonObject(text.substring(i, j + 1));
+          if (hasReviewShape(parsed)) return parsed;
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 export function parseReviewResult(text: string): ReviewResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stripJsonFence(text));
-  } catch {
+  const parsed = findFirstReviewJson(text);
+  if (!parsed) {
     throw new Error("Review output must be valid JSON.");
   }
 

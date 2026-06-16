@@ -226,20 +226,13 @@ export async function runDevelopmentWorkflowHandler(
       runner
     );
 
-    // Check verification content for pass/fail signals
-    const resultText = verifyResult.content[0].text;
-    const hasFailure = detectVerificationFailure(resultText);
-    const isCodexError = verifyResult.isError === true;
-
     stages.push({
       stage: "verify",
-      ok: !isCodexError && !hasFailure,
-      summary: isCodexError
+      ok: !verifyResult.isError,
+      summary: verifyResult.isError
         ? "Verification execution error."
-        : hasFailure
-          ? "Verification identified issues."
-          : "Verification passed.",
-      details: resultText
+        : "Verification passed.",
+      details: verifyResult.content[0].text
     });
   }
 
@@ -266,7 +259,9 @@ function buildWorkflowResponse(workflow: string, stages: StageResult[]): McpText
       workflow,
       stages,
       failedStage: firstFailed.stage,
-      nextAction
+      nextAction,
+      failureSummary: firstFailed.summary,
+      failureDetails: firstFailed.details ?? ""
     }, null, 2));
   }
   return textResult(JSON.stringify({
@@ -283,27 +278,4 @@ function parseImplementOk(text: string): boolean {
   } catch {
     return false;
   }
-}
-
-function detectVerificationFailure(text: string): boolean {
-  // Check for explicit failure signals in the verification output
-  const failurePatterns = [
-    /exit code:\s*[1-9]\d*/i,      // "Exit code: 1" or higher
-    /command result:\s*FAILED/i,     // Explicit FAILED marker
-    /(?:^|\n)#+\s*findings/i,       // Findings section heading
-    /\b(?:fail(?:ed|ure|s)?|unsuccessful)\b/i,  // fail/failed/failure/failures/unsuccessful
-    /\b(?:error|erroring|errored)\b/i,           // error/errors
-  ];
-
-  // Negation patterns that indicate "no issues"
-  const negationPatterns = [
-    /no (?:issues|errors|problems|failures)/i,
-    /all (?:tests|checks|commands?)? passed/i,
-    /everything (?:looks|is) (?:good|fine|ok|clean)/i
-  ];
-
-  const hasFailure = failurePatterns.some((p) => p.test(text));
-  const hasNegation = negationPatterns.some((p) => p.test(text));
-
-  return hasFailure && !hasNegation;
 }

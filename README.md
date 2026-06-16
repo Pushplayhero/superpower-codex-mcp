@@ -205,11 +205,13 @@ include a top-level machine-readable `deprecation` object:
 
 ### Workflow diagnostics
 
-When `run_development_workflow` does not complete cleanly, it returns two
+When `run_development_workflow` does not complete cleanly, it returns these
 additional diagnostic fields:
 
 - `failedStage`: The name of the first failing stage (e.g. `"plan"`, `"implement"`, `"review"`, `"verify"`).
 - `nextAction`: A descriptive recommendation on what to do next to resolve the issue.
+- `failureSummary`: The failed stage summary lifted to the top level.
+- `failureDetails`: The failed stage details lifted to the top level.
 
 ## Workspace safety
 
@@ -241,7 +243,7 @@ npm.cmd test
 npm.cmd run build
 ```
 
-The verified baseline is 151 passing tests across 11 test files.
+The verified baseline is 160 passing tests across 11 test files.
 
 ## Updating an existing Windows installation
 
